@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KMC I–V 对比</title>
+<style>
+:root { color-scheme:light; --ink:#19353c; --muted:#4c646a; --border:#d9e2e1; --sim:#007571; --exp:#a24a25; --ref:#6c4c91; }
+* { box-sizing:border-box; } [hidden] { display:none!important; }
+body { margin:0; background:#edf2f1; color:var(--ink); font:15px/1.55 "Segoe UI","Microsoft YaHei UI",system-ui,sans-serif; }
+header { background:#18383f; color:white; padding:21px max(3vw,16px); } h1,main { max-width:1200px; margin:auto; }
+h1 { font-size:clamp(23px,3vw,36px); line-height:1.3; overflow-wrap:anywhere; }
+main { padding:16px 14px 28px; } section { margin:12px 0; padding:17px 20px; background:white; border:1px solid var(--border); }
+h2,h3 { margin:0; } h2 { font-size:19px; } h3 { font-size:15px; } p { margin:6px 0; }
+nav,.controls,.legend { display:flex; flex-wrap:wrap; align-items:center; gap:6px 18px; }
+nav { font-size:14px; } a { color:#006963; }
+.controls { margin:9px 0; } .controls label,.legend label { display:inline-flex; align-items:center; gap:5px; }
+select,button { border:1px solid #b6c5c5; border-radius:4px; background:white; color:inherit; padding:5px 8px; font:inherit; }
+button { padding:4px 8px; cursor:pointer; } button:disabled { opacity:.45; cursor:default; }
+:focus-visible { outline:2px solid #007570; outline-offset:2px; }
+.legend,.minor { font-size:13px; color:var(--muted); } .legend { margin:7px 0 0; }
+.legend i { width:17px; border-top:3px solid var(--stroke); display:inline-block; }
+canvas { width:100%; height:clamp(320px,43vw,475px); display:block; touch-action:pan-y; }
+.readout { background:#f2f6f5; padding:7px 11px; min-height:34px; font-variant-numeric:tabular-nums; }
+.panels { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr)); gap:16px; }
+figure { margin:6px 0 0; min-width:0; } .panels canvas { height:clamp(260px,31vw,345px); }
+@media(max-width:650px){ main { padding:8px; } section { padding:12px 10px; } .controls { gap:8px 11px; } .panels { grid-template-columns:1fr; } .readout { min-height:50px; } }
+</style>
+</head><body>
+<header><h1 id="title">I–V 曲线对比</h1></header>
+<main>
+<nav aria-label="报告文件"><a href="summary.md">结果总结</a><a href="iv_all.csv" download>下载模拟 I–V（CSV）</a><a href="iv_overlay.pdf">静态 I–V 叠加图（PDF）</a><a id="morph" hidden>形貌图册（PDF）</a></nav>
+<section><h2>单圈 I–V</h2>
+<div class="controls">
+  <label>模拟圈号 <select id="sim-cycle"></select></label>
+  <button type="button" id="prev" aria-label="上一模拟圈">‹</button><button type="button" id="next" aria-label="下一模拟圈">›</button>
+  <label id="exp-control">实测圈号 <select id="exp-cycle"></select></label>
+  <label>扫描阶段 <select id="phase"><option value="all">全部阶段</option></select></label>
+  <label>分支 <select id="branch"><option value="all">全部分支</option></select></label>
+  <label>纵轴 <select id="scale"><option value="log">对数 |I|</option><option value="linear">线性 I</option></select></label>
+  <label><input type="checkbox" id="markers">显示采样点</label>
+</div>
+<div class="legend">
+ <label style="--stroke:var(--sim)"><input type="checkbox" id="show-sim" checked><i></i><span id="sim-name">模拟</span></label>
+ <label id="exp-key" style="--stroke:var(--exp)"><input type="checkbox" id="show-exp" checked><i></i><span id="exp-name">实测</span></label>
+ <label id="ref-key" style="--stroke:var(--ref)"><input type="checkbox" id="show-ref" checked><i></i><span id="ref-name">参考</span></label>
+ <span>实线为去程，虚线为回扫。</span>
+</div>
+<canvas id="single" role="img" aria-label="所选圈次 I–V 与参考线"></canvas>
+<p class="readout minor" id="readout" aria-live="off">悬停或点按曲线可读取原始采样。</p>
+<p class="minor">各数据源使用各自的电压采样点，按扫描顺序连线。对数轴显示非零电流的幅值，线性轴保留电流符号。</p>
+</section>
+<section id="ensemble"><h2>多圈 I–V 叠加</h2>
+<p class="minor">各图共用坐标范围，随上方扫描阶段、分支和纵轴切换。</p>
+<div class="panels"><figure id="observed-panel"><h3 id="obs-heading"></h3><canvas id="observed" role="img" aria-label="实测多圈叠加"></canvas></figure>
+<figure><h3 id="sim-heading"></h3><canvas id="simulated" role="img" aria-label="模拟多圈叠加"></canvas></figure></div>
+</section></main>
+<script type="application/json" id="iv-data">__IV_DATA__</script>
+<script>
+'use strict';
+const data = JSON.parse(document.getElementById('iv-data').textContent);
+const el = id => document.getElementById(id);
+const sim = el('sim-cycle'), exp = el('exp-cycle'), phase = el('phase'), branch = el('branch'), scale = el('scale');
+const colors = {sim:'#007571',exp:'#a24a25',ref:'#6c4c91'};
+const directions = {outward:'去程',return:'回扫'};
+const hint = '悬停或点按曲线可读取原始采样。';
+let hover = null, hits = [];
+
+function fillCycles(select, runs) {
+  for (const run of runs) select.add(new Option(String(run.cycle),String(run.cycle)));
+}
+fillCycles(sim,data.simulated); fillCycles(exp,data.measured); sim.value=String(data.focus);
+if (data.measured.some(run=>run.cycle===data.focus)) exp.value=String(data.focus);
+for (const id of ['exp-control','exp-key','observed-panel']) el(id).hidden=!data.measured.length;
+el('ref-key').hidden=!data.reference; el('ensemble').hidden=!data.overlays;
+if (data.reference) el('ref-name').textContent='参考 · '+data.reference.label;
+if (data.morphology) { el('morph').href=data.morphology; el('morph').hidden=false; }
+el('title').textContent=data.label+' · I–V 曲线'; document.title=el('title').textContent;
+const phases=new Set(), directionsUsed=new Set();
+for (const run of [...data.simulated,...data.measured,...(data.reference?[data.reference]:[])]) {
+  for (const segment of run.series) { phases.add(segment.phase); directionsUsed.add(segment.branch); }
+}
+for (const key of ['SET','RESET']) if (phases.has(key)) phase.add(new Option(key,key));
+for (const key of ['outward','return']) if (directionsUsed.has(key)) branch.add(new Option(directions[key],key));
+
+function visibleLines(run, type, name) {
+  if (!run) return [];
+  return run.series.filter(s=>(phase.value==='all'||s.phase===phase.value)&&(branch.value==='all'||s.branch===branch.value))
+    .map(s=>({segment:s,type,name}));
+}
+function transformed(i) {
+  return scale.value==='log' ? (i===0 ? null : Math.log10(Math.abs(i))) : i;
+}
+function extent(lines) {
+  let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
+  for (const {segment:s} of lines) {
+    for (let j=0;j<s.i.length;j++) {
+      const y=transformed(s.i[j]); if (y===null) continue;
+      xmin=Math.min(xmin,s.v[j]); xmax=Math.max(xmax,s.v[j]); ymin=Math.min(ymin,y); ymax=Math.max(ymax,y);
+    }
+  }
+  if (xmin===Infinity) return null;
+  if (xmin===xmax) { const pad=Math.abs(xmin)*.05||.01; xmin-=pad; xmax+=pad; }
+  if (scale.value==='log') { ymin=Math.floor(ymin); ymax=Math.max(ymin+1,Math.ceil(ymax)); }
+  else { const pad=(ymax-ymin)*.04 || Math.abs(ymax)*.04 || 1e-12; ymin-=pad; ymax+=pad; }
+  return {xmin,xmax,ymin,ymax};
+}
+function tick(value) {
+  if (value===0) return '0';
+  if (Math.abs(value)<.001 || Math.abs(value)>=1e5) return value.toExponential(1);
+  return String(Number(value.toPrecision(3)));
+}
+function currentUnit(bounds) {
+  const size=Math.max(Math.abs(bounds.ymin),Math.abs(bounds.ymax));
+  for (const [unit,divisor] of [['A',1],['mA',1e-3],['µA',1e-6],['nA',1e-9],['pA',1e-12]]) {
+    if (size>=divisor) return [unit,divisor];
+  }
+  return ['A',1];
+}
+function plot(canvas, lines, bounds, isSingle) {
+  const w=canvas.clientWidth,h=canvas.clientHeight,r=window.devicePixelRatio||1;
+  canvas.width=Math.round(w*r); canvas.height=Math.round(h*r);
+  const c=canvas.getContext('2d'); c.setTransform(r,0,0,r,0,0); c.font='12px system-ui'; c.fillStyle='#415c65';
+  if (!bounds||!lines.length) { c.textAlign='center'; c.fillText('当前筛选下没有可绘制的采样点',w/2,h/2); return []; }
+  const {xmin,xmax,ymin,ymax}=bounds,left=71,right=w-18,top=16,bottom=h-43;
+  const log=scale.value==='log', [unit,divisor]=log?['A',1]:currentUnit(bounds);
+  const xx=x=>left+(right-left)*(x-xmin)/(xmax-xmin), yy=y=>bottom-(bottom-top)*(y-ymin)/(ymax-ymin);
+  function grid(x,y,X,Y) { c.beginPath();c.moveTo(x,y);c.lineTo(X,Y);c.strokeStyle='#dce5e3';c.lineWidth=1;c.stroke(); }
+  c.textBaseline='middle'; c.textAlign='center';
+  const nx=w<430?4:6;
+  for (let j=0;j<=nx;j++) { const x=xmin+(xmax-xmin)*j/nx; grid(xx(x),top,xx(x),bottom);c.fillText(tick(x),xx(x),bottom+13); }
+  function ytick(y,label) { grid(left,yy(y),right,yy(y));c.fillText(label,left-7,yy(y)); }
+  c.textAlign='right';
+  if (log) { const step=Math.max(1,Math.ceil((ymax-ymin)/7)); for(let y=ymin;y<=ymax;y+=step) ytick(y,'1e'+y); }
+  else { for (let j=0;j<=4;j++) { const y=ymin+(ymax-ymin)*j/4; ytick(y,tick(y/divisor)); } }
+  c.textAlign='center'; c.fillText('偏压（V）',(left+right)/2,h-8);
+  c.save();c.translate(13,(top+bottom)/2);c.rotate(-Math.PI/2);c.fillText((log?'|I|':'I')+'（'+unit+'）',0,0);c.restore();
+  c.save();c.beginPath();c.rect(left-3,top-3,right-left+6,bottom-top+6);c.clip();
+  c.globalAlpha=isSingle?1:Math.max(.1,Math.min(.65,2/Math.sqrt(lines.length)));
+  const selectable=[];
+  for (const line of lines) {
+    const s=line.segment, points=[], singletons=[];
+    c.strokeStyle=colors[line.type]; c.fillStyle=colors[line.type]; c.lineWidth=isSingle?1.8:1.1;
+    c.setLineDash(s.branch==='return'?[4,3]:[]); c.beginPath(); let runLength=0;
+    for(let j=0;j<s.i.length;j++) {
+      const y=transformed(s.i[j]);
+      if (y===null) {
+        if (runLength===1) singletons.push(points[points.length-1]);
+        runLength=0;continue;
+      }
+      const px=xx(s.v[j]),py=yy(y);
+      if (runLength) c.lineTo(px,py); else c.moveTo(px,py);
+      runLength++; points.push([px,py]);
+      if (isSingle) selectable.push({px,py,line,j});
+    }
+    if (runLength===1) singletons.push(points[points.length-1]);
+    c.stroke();
+    const dots=isSingle&&el('markers').checked?points:singletons;
+    for (const [px,py] of dots) { c.beginPath();c.arc(px,py,1.7,0,2*Math.PI);c.fill(); }
+  }
+  if (isSingle&&hover) {
+    c.globalAlpha=1;c.setLineDash([]);c.strokeStyle=colors[hover.line.type];c.lineWidth=2;
+    c.beginPath();c.arc(hover.px,hover.py,4.2,0,2*Math.PI);c.stroke();
+  }
+  c.restore(); return selectable;
+}
+function drawSingle() {
+  const s=data.simulated[sim.selectedIndex],e=data.measured[exp.selectedIndex],lines=[];
+  el('prev').disabled=sim.selectedIndex===0; el('next').disabled=sim.selectedIndex===sim.options.length-1;
+  const simName='模拟 C'+s.cycle;
+  el('sim-name').textContent=simName;
+  if (el('show-sim').checked) lines.push(...visibleLines(s,'sim',simName));
+  if (e) { const name='实测 C'+e.cycle; el('exp-name').textContent=name; if(el('show-exp').checked) lines.push(...visibleLines(e,'exp',name)); }
+  if (data.reference&&el('show-ref').checked) lines.push(...visibleLines(data.reference,'ref','参考 · '+data.reference.label));
+  hits=plot(el('single'),lines,extent(lines),true);
+}
+function clearHover() { hover=null;el('readout').textContent=hint;drawSingle(); }
+function inspect(event) {
+  const box=el('single').getBoundingClientRect(),x=event.clientX-box.left,y=event.clientY-box.top;
+  let closest=null,dist=18*18;
+  for (const point of hits) { const delta=(x-point.px)**2+(y-point.py)**2; if(delta<dist){closest=point;dist=delta;} }
+  if (hover===null&&closest===null) return;
+  hover=closest;
+  if (hover) {
+    const {line,j}=hover,s=line.segment;
+    el('readout').textContent=[line.name,s.phase+' '+directions[s.branch],'采样点 '+(s.first+j+1),
+      'V = '+s.v[j].toPrecision(6)+' V','I = '+s.i[j].toExponential(6)+' A'].join('　');
+  } else el('readout').textContent=hint;
+  drawSingle();
+}
+function overlayGroup(runs,type) {
+  let count=0;const lines=[];
+  for(const run of runs.slice(0,data.overlays)) {
+    const group=visibleLines(run,type,'');
+    if(group.some(({segment:s})=>s.i.some(i=>transformed(i)!==null))) { count++;lines.push(...group); }
+  }
+  return {count,lines};
+}
+function drawOverlays() {
+  if(!data.overlays) return;
+  const e=overlayGroup(data.measured,'exp'),s=overlayGroup(data.simulated,'sim');
+  const range=extent([...e.lines,...s.lines]);
+  el('sim-heading').textContent='模拟 · '+s.count+' 圈';
+  plot(el('simulated'),s.lines,range,false);
+  if(data.measured.length) {
+    el('obs-heading').textContent='实测 · '+e.count+' 圈（按采集顺序）';
+    plot(el('observed'),e.lines,range,false);
+  }
+}
+function redraw() { clearHover();drawOverlays(); }
+for (const control of [sim,exp,el('show-sim'),el('show-exp'),el('show-ref'),el('markers')]) control.addEventListener('change',clearHover);
+for (const control of [phase,branch,scale]) control.addEventListener('change',redraw);
+el('prev').onclick=()=>{sim.selectedIndex--;clearHover();}; el('next').onclick=()=>{sim.selectedIndex++;clearHover();};
+el('single').addEventListener('pointermove',inspect);el('single').addEventListener('click',inspect);
+el('single').addEventListener('pointerleave',clearHover);
+window.addEventListener('resize',redraw);redraw();
+</script></body></html>

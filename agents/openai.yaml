@@ -1,0 +1,4 @@
+interface:
+  display_name: "kmc-output"
+  short_description: "从已有 KMC 循环轨迹生成 I–V 交互报告、独立 CSV 和 Ag 形貌图册"
+  default_prompt: "用 $kmc-output 把这次模拟的 I–V、Ag 形貌和逐圈结果导出到报告目录。"
